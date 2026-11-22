@@ -1,6 +1,6 @@
 # NPI Gallery
 
-![VERSION](https://img.shields.io/badge/VERSION-0.1.189-ff6b6b?style=for-the-badge&labelColor=555555)
+![VERSION](https://img.shields.io/badge/VERSION-0.1.271-ff6b6b?style=for-the-badge&labelColor=555555)
 ![PYTHON](https://img.shields.io/badge/PYTHON-3.10%2B-3776ab?style=for-the-badge&logo=python&logoColor=white&labelColor=555555)
 ![UI](https://img.shields.io/badge/UI-PYSIDE6-41cd52?style=for-the-badge&labelColor=555555)
 ![PLATFORM](https://img.shields.io/badge/PLATFORM-WINDOWS%2010%20%2F%2011-0078d4?style=for-the-badge&labelColor=555555)
@@ -9,6 +9,7 @@ A fast, modern photo and video gallery for the folders you already have.
 
 <p align="center">
   <img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/c30d0587-b89f-4dd8-9be6-72de52384d5a" />
+<img width="1920" height="1200" alt="Screenshot (1895)" src="https://github.com/user-attachments/assets/cce6a41a-8da5-4684-afc2-0d9d1cbb48b0" />
 
 </p>
 
