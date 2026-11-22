@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#63d6ff"/>
+      <stop offset="0.55" stop-color="#3a8cff"/>
+      <stop offset="1" stop-color="#2e4fd8"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#bfe6ff"/>
+      <stop offset="1" stop-color="#fdf3e4"/>
+    </linearGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6fa0ff"/>
+      <stop offset="1" stop-color="#4a72e8"/>
+    </linearGradient>
+    <linearGradient id="near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f56c8"/>
+      <stop offset="1" stop-color="#1f2f8f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.15" r="0.9">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="card"><rect x="104" y="132" width="304" height="268" rx="34"/></clipPath>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#0b1b5a" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#glow)"/>
+  <g transform="rotate(-9 256 256)">
+    <rect x="112" y="116" width="288" height="256" rx="32" fill="#ffffff" fill-opacity="0.38"/>
+  </g>
+  <g transform="rotate(5 256 266)" filter="url(#shadow)">
+    <rect x="104" y="132" width="304" height="268" rx="34" fill="#ffffff"/>
+    <g clip-path="url(#card)">
+      <rect x="104" y="132" width="304" height="268" fill="url(#sky)"/>
+      <circle cx="334" cy="208" r="27" fill="#ffb627"/>
+      <path d="M96 410 L196 262 L262 352 L318 290 L420 410 Z" fill="url(#far)"/>
+      <path d="M96 410 L168 334 L222 384 L286 318 L420 410 Z" fill="url(#near)"/>
+    </g>
+  </g>
+</svg>
