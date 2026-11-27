@@ -1335,6 +1335,12 @@ class ViewerWindow(QWidget):
             self._set_wallpaper()  # ignores a video and does nothing where wallpapers are not supported
         elif key == Qt.Key.Key_Space and self._video_mode:
             self._toggle_video()  # Space plays / pauses a video instead of stepping on
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right) and self._video_mode and self._video is not None:
+            # In a video the left / right arrows skip back / forward (5 or 10 s, Settings > Videos);
+            # Up / Down / PageUp / PageDown still go to the previous / next item.
+            step = self._video.seek_step_ms()
+            self._video.seek_by(step if key == Qt.Key.Key_Right else -step)
+            self._poke()
         elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Space):
             self._step(1)
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Backspace):

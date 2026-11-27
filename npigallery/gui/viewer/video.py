@@ -15,8 +15,8 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPalette, QPen
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..common.icons import draw_icon
@@ -25,6 +25,17 @@ from . import geometry as geo
 from .overlays import GlassPanel, IconButton
 from .style import CANVAS, GLASS_BORDER, TEXT, TEXT_DIM, accent_pair
 
+DEBUG = os.environ.get("NPI_VIDEO_DEBUG") == "1"  # prints the renderer decisions to stderr
+
+
+def _dbg(message: str) -> None:
+    if DEBUG:
+        import sys
+
+        print(f"[npigallery video] {message}", file=sys.stderr, flush=True)
+
+
+SOFTWARE_AFTER_MS = 2500  # an AV1 clip with no picture after this long is handed to the software player
 BAR_HEIGHT = 40
 BAR_MAX_WIDTH = 640
 _QT_MISSING = False
@@ -92,6 +103,13 @@ class VideoSurface(QWidget):
         self.caption_hit: Callable[[QPoint], bool] | None = None
         self._insets = (0, 0, 0, 0)
         self._frame = None
+        self._soft = None  # SoftwarePlayer (PyAV, CPU) while QtMultimedia cannot play the clip, else None
+        self._tried_soft = False  # the software player is tried once per clip
+        self._got_frame = False  # QtMultimedia has delivered a picture for the current clip
+        self._loop = False
+        self._frame_serial = 0  # bumped for every new frame; keys the scaled copy below
+        self._fitted: QImage | None = None  # the current frame scaled to its on-screen size
+        self._fitted_key: tuple | None = None
         self._press_pos: QPoint | None = None
         self._side_zone = 0  # edge of a click that is waiting to see whether it becomes a double-click
         self._side_timer = QTimer(self)
@@ -123,6 +141,15 @@ class VideoSurface(QWidget):
                 self._widget = None
         self._badge = _PlayBadge(self)
         self._gpu_active = self._widget is not None
+        self._gpu_wanted = self._gpu_active  # what the window asked for; kept while the software player is on
+        self._watch = QTimer(self)  # an AV1 clip that shows no picture after a while is handed to PyAV
+        self._watch.setSingleShot(True)
+        self._watch.timeout.connect(self._check_stalled)
+        if self._widget is not None:
+            try:
+                self._widget.videoSink().videoFrameChanged.connect(self._note_frame)
+            except AttributeError:
+                pass
         self._sink = QVideoSink(self)
         self._sink.videoFrameChanged.connect(self._on_frame)
         if self._widget is None:
@@ -137,16 +164,27 @@ class VideoSurface(QWidget):
 
     def load(self, path: Path, autoplay: bool = True) -> None:
         self._cancel_side_click()
+        self._leave_software()
         self._path = path
         self._frame = None
+        self._got_frame = False
+        self._tried_soft = False
         self.update()
+        if os.environ.get("NPI_AV1_SOFTWARE") == "1":  # always decode AV1 on the CPU (handy to test it)
+            from . import swplayer
+
+            if swplayer.available() and swplayer.video_codec_name(path) == "av1" and self._start_software(autoplay):
+                return
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         if autoplay:
             self._player.play()
+            self._watch.start(SOFTWARE_AFTER_MS)
 
     def release(self) -> None:
         self._cancel_side_click()
         """Let go of the file (Windows will not delete or rename a clip that is still open)."""
+        self._watch.stop()
+        self._leave_software()
         self._player.stop()
         self._player.setSource(QUrl())
         self._frame = None
@@ -158,6 +196,12 @@ class VideoSurface(QWidget):
         return self._playing
 
     def toggle_play(self) -> None:
+        if self._soft is not None:
+            if self._soft.is_playing():
+                self._soft.pause()
+            else:
+                self._soft.play()
+            return
         if self._player.source().isEmpty():
             return
         if self._playing:
@@ -167,14 +211,20 @@ class VideoSurface(QWidget):
 
     def set_loop(self, on: bool) -> None:
         """Play the clip again from the start whenever it reaches the end (no `ended` signal then)."""
+        self._loop = bool(on)
+        if self._soft is not None:
+            self._soft.set_loop(on)
         loops = self._QMediaPlayer.Loops
         self._player.setLoops(loops.Infinite if on else loops.Once)
 
     def seek_to(self, ms: int) -> None:
+        if self._soft is not None:
+            self._soft.seek(geo.clamp_position(ms, self._soft.duration()))
+            return
         self._player.setPosition(geo.clamp_position(ms, self._player.duration()))
 
     def seek_by(self, delta_ms: int) -> None:
-        self.seek_to(self._player.position() + delta_ms)
+        self.seek_to(self.position() + delta_ms)
 
     def seek_step_ms(self) -> int:
         """5 or 10 seconds, from Settings > Videos."""
@@ -194,12 +244,14 @@ class VideoSurface(QWidget):
             self.side_clicked.emit(zone)
 
     def duration(self) -> int:
-        return self._player.duration()
+        return self._soft.duration() if self._soft is not None else self._player.duration()
 
     def position(self) -> int:
-        return self._player.position()
+        return self._soft.position() if self._soft is not None else self._player.position()
 
     def set_muted(self, muted: bool) -> None:
+        if self._soft is not None:
+            self._soft.set_muted(muted)
         self._audio.setMuted(muted)
 
     def is_muted(self) -> bool:
@@ -209,6 +261,8 @@ class VideoSurface(QWidget):
         """`level` is the slider position (0-1); loudness is perceived roughly quadratically, so square it."""
         level = min(1.0, max(0.0, level))
         self._audio.setVolume(level * level)
+        if self._soft is not None:
+            self._soft.set_volume(level * level)
 
     def set_insets(self, left: int, top: int, right: int, bottom: int) -> None:
         self._insets = (left, top, right, bottom)
@@ -216,6 +270,9 @@ class VideoSurface(QWidget):
         self.update()
 
     def set_gpu(self, enabled: bool) -> None:
+        self._gpu_wanted = enabled
+        if self._soft is not None:
+            return  # the software player paints on the CPU path whatever the window asks for
         if self._widget is None or enabled == self._gpu_active:
             return
         self._gpu_active = enabled
@@ -238,6 +295,7 @@ class VideoSurface(QWidget):
             self._widget.setGeometry(stage)
         self._badge.move(stage.center().x() - _PlayBadge.SIZE // 2, stage.center().y() - _PlayBadge.SIZE // 2)
         self._badge.raise_()
+        self._push_target()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -246,6 +304,9 @@ class VideoSurface(QWidget):
     def _update_badge(self) -> None:
         # Not while a clip is still loading: switching clips stops the player for a moment, and the
         # bright play button would flash up between the two.
+        if self._soft is not None:
+            self._badge.setVisible(False)  # the software player's pause badge is painted by paintEvent
+            return
         status = self._QMediaPlayer.MediaStatus
         loaded = self._player.mediaStatus() in (
             status.LoadedMedia,
@@ -259,10 +320,19 @@ class VideoSurface(QWidget):
     # // player signals
 
     def _on_frame(self, frame) -> None:
+        if isinstance(frame, QImage) or frame.isValid():  # QtMultimedia also sends empty frames (new clip, stop)
+            self._got_frame = True
         self._frame = frame
+        self._frame_serial += 1
         self.update()
 
+    def _note_frame(self, frame) -> None:
+        if frame.isValid():
+            self._got_frame = True  # the video widget (GPU path) has a picture
+
     def _on_state(self, state) -> None:
+        if self._soft is not None:
+            return  # QtMultimedia is stopped; the software player reports its own state
         playing = state == self._QMediaPlayer.PlaybackState.PlayingState
         if playing != self._playing:
             self._playing = playing
@@ -270,11 +340,95 @@ class VideoSurface(QWidget):
         self._update_badge()
 
     def _on_status(self, status) -> None:
+        if self._soft is not None:
+            return
         self._update_badge()
         if status == self._QMediaPlayer.MediaStatus.EndOfMedia:
             self.ended.emit()
 
     def _on_error(self, _error, message: str) -> None:
+        if self._soft is not None:
+            return
+        _dbg(f"QtMultimedia error: {message!r}")
+        if self._start_software(True):  # QtMultimedia cannot decode it (typically AV1 without a GPU for it)
+            return
+        self.failed.emit(message or "Unsupported video")
+
+    # // software (CPU) playback through PyAV
+
+    def _check_stalled(self) -> None:
+        """QtMultimedia sometimes reports no error for an AV1 clip it cannot decode: it just shows nothing."""
+        if self._soft is not None or self._got_frame or self._path is None:
+            return
+        from . import swplayer
+
+        codec = swplayer.video_codec_name(self._path) if swplayer.available() else ""
+        _dbg(f"no picture after {SOFTWARE_AFTER_MS} ms: codec={codec!r}, state={self._player.playbackState()}")
+        if codec:  # any codec: QtMultimedia has none of them without the right decoder (AV1, HEVC, ...)
+            self._start_software(True)
+
+    def _start_software(self, autoplay: bool) -> bool:
+        """Play the current clip with PyAV on the CPU. False when that is not possible (no PyAV, or tried already)."""
+        if self._soft is not None or self._tried_soft or self._path is None:
+            return False
+        try:
+            from . import swplayer
+        except ImportError:
+            return False
+        if not swplayer.available():
+            return False
+        self._tried_soft = True
+        _dbg("switching to the software (PyAV) player")
+        self._watch.stop()
+        soft = swplayer.SoftwarePlayer(self)
+        soft.frame_ready.connect(self._on_frame)
+        soft.position_changed.connect(self.position_changed)
+        soft.duration_changed.connect(self.duration_changed)
+        soft.playing_changed.connect(self._soft_playing)
+        soft.ended.connect(self.ended)
+        soft.failed.connect(self._soft_failed)
+        self._soft = soft  # from here on QtMultimedia's own signals are ignored
+        self._player.stop()
+        self._player.setSource(QUrl())
+        if self._widget is not None:
+            self._widget.hide()
+        self._gpu_active = False
+        self._badge.hide()
+        soft.set_loop(self._loop)
+        soft.set_volume(self._audio.volume())
+        soft.set_muted(self._audio.isMuted())
+        self._frame = None
+        self._push_target()
+        soft.open(self._path, autoplay)
+        self.update()
+        return True
+
+    def _leave_software(self) -> None:
+        soft, self._soft = self._soft, None
+        if soft is None:
+            return
+        soft.close()
+        soft.deleteLater()
+        if self._playing:
+            self._playing = False
+            self.playing_changed.emit(False)
+        if self._widget is not None:  # give the clip back to the GPU path the window asked for
+            self._gpu_active = not self._gpu_wanted
+            self.set_gpu(self._gpu_wanted)
+
+    def _push_target(self) -> None:
+        if self._soft is not None:
+            stage = self._stage()
+            ratio = self.devicePixelRatioF()
+            self._soft.set_target(round(stage.width() * ratio), round(stage.height() * ratio))
+
+    def _soft_playing(self, playing: bool) -> None:
+        if playing != self._playing:
+            self._playing = playing
+            self.playing_changed.emit(playing)
+        self.update()
+
+    def _soft_failed(self, message: str) -> None:
         self.failed.emit(message or "Unsupported video")
 
     # // painting
@@ -288,17 +442,47 @@ class VideoSurface(QWidget):
         painter.fillRect(self.rect(), CANVAS)
         if self._gpu_active:
             return  # the video widget draws the frames
-        image = self._frame.toImage() if self._frame is not None and self._frame.isValid() else None
         stage = self._stage()
-        if image is not None and not image.isNull():
-            # Smooth scaling of a 1080p frame is the costliest step on the CPU: only a paused (still) frame gets it.
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, not self._playing)
-            scale = min(stage.width() / image.width(), stage.height() / image.height())
-            width, height = image.width() * scale, image.height() * scale
-            target = QRectF(stage.center().x() - width / 2, stage.center().y() - height / 2, width, height)
-            painter.drawImage(target, image)
-        if not self._playing and image is not None:
-            self._paint_play_badge(painter, stage)
+        image = self._fitted_frame(stage)
+        if image is not None:
+            ratio = image.devicePixelRatio() or 1.0
+            # The frame is already exactly as many device pixels as it will cover, so it is blitted 1:1 on a
+            # device-pixel boundary: no resampling by Qt (that is what made the edges jagged), no smearing.
+            x = round(stage.center().x() * ratio - image.width() / 2) / ratio
+            y = round(stage.center().y() * ratio - image.height() / 2) / ratio
+            painter.drawImage(QPointF(x, y), image)
+            if not self._playing:
+                self._paint_play_badge(painter, stage)
+
+    def _fitted_frame(self, stage: QRectF) -> QImage | None:
+        """The current frame scaled to exactly the size it has on screen (device pixels), with Qt's
+        area-weighted SmoothTransformation (every source pixel counts when shrinking, bilinear when
+        enlarging). Painting a frame at a different size would use Qt's plain sampling, which is jagged
+        while playing. The result is kept, so repaints of the same frame (pause, overlays) cost nothing."""
+        if self._frame is None:
+            return None
+        if isinstance(self._frame, QImage):  # from the software player, already scaled by swscale
+            if self._frame.isNull():
+                return None
+        elif not self._frame.isValid():
+            return None
+        ratio = self.devicePixelRatioF()
+        key = (self._frame_serial, round(stage.width() * ratio), round(stage.height() * ratio), ratio)
+        if self._fitted is not None and self._fitted_key == key:
+            return self._fitted
+        source = self._frame if isinstance(self._frame, QImage) else self._frame.toImage()
+        if source.isNull():
+            return None
+        scale = min(stage.width() * ratio / source.width(), stage.height() * ratio / source.height())
+        width, height = max(1, round(source.width() * scale)), max(1, round(source.height() * scale))
+        if abs(width - source.width()) > 1 or abs(height - source.height()) > 1:
+            source = source.scaled(
+                width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+        source = QImage(source)  # shares the pixels; the ratio is set on this handle only
+        source.setDevicePixelRatio(ratio)
+        self._fitted, self._fitted_key = source, key
+        return source
 
     def _paint_play_badge(self, painter: QPainter, stage: QRectF) -> None:
         """A paused (or finished) clip shows a play button in the middle."""

@@ -1,0 +1,24 @@
+NPI Gallery - Updates
+Date: 2026-11-25
+
+Video viewer
+- Fixed jagged edges when watching video in fullscreen. Frames are now scaled
+  to the exact on-screen size with smooth (area-weighted) scaling and drawn
+  1:1, instead of being stretched with nearest-neighbour sampling.
+  (viewer/video.py)
+- Left / Right arrow keys now skip back / forward in a video (5 or 10 seconds,
+  from Settings > Videos). Up / Down / PageUp / PageDown still go to the
+  previous / next item. Photos are unchanged. (viewer/window.py)
+- Added a software (CPU) player for clips QtMultimedia cannot decode, such as
+  AV1 on a PC without AV1 hardware decoding. It uses PyAV for decoding and
+  QAudioSink for sound, with the audio output as the clock. Play / pause,
+  seek, loop, volume and mute all work in this mode. (viewer/swplayer.py,
+  viewer/video.py)
+- The software player is used automatically when QtMultimedia reports an
+  error, or shows no picture after about 2.5 seconds.
+- AV1 now explicitly uses the libdav1d / libaom decoder instead of FFmpeg's
+  built-in hardware-only AV1 decoder. If PyAV has neither, a clear message is
+  shown on screen instead of a black screen.
+- New environment variables for troubleshooting:
+    NPI_AV1_SOFTWARE=1   always decode AV1 on the CPU
+    NPI_VIDEO_DEBUG=1    print what the video player is doing to the console
